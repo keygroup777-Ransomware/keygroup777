@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Lucifer Love</title>
+  <style>
+    body {
+      background-color: black;
+      color: red;
+      font-family: cursive; 
+      text-align: center;
+      margin: 0;
+      padding: 0;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .love-text {
+      font-size: 4em;
+    }
+  </style>
+</head>
+<body>
+  <audio id="music" src="satana/audio.mp3" controls></audio> 
+  <div class="love-text">
+    <h1>𝑳𝒖𝒄𝒊𝒇𝒆𝒓 люблю</h1>
+  </div>
+
+  <script>
+    const audio = document.getElementById("music");
+
+    // Проверка поддержки HTML5 audio
+    if (audio.canPlayType('audio/mpeg')) {
+      // Запускаем звук после загрузки страницы
+      window.onload = function() {
+        audio.play(); // Используем переменную audio
+      };
+    } else {
+      console.error("Ваш браузер не поддерживает HTML5 audio.");
+    }
+  </script>
+</body>
+</html>
